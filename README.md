@@ -79,6 +79,7 @@ docs/                      思路开源 PDF 和图
 - `GET /api/song/url?enc=&ori=` → `{ url }` —— 一首歌能直接塞进 `<audio>` 的 https 地址（见下面「放歌」）。
 - `POST /api/asr`，`{ data: base64 的 16k 单声道 pcm, format: 'pcm', rate: 16000, … }` → `{ ok, text }` —— 热线的语音转字。不接就只能递纸条。
 - 配置：在页面同源的 localStorage 里写 `midnight-fm-config`：`{ "baseUrl": "https://你的服务器", "token": "…" }`。
+- 字体：页面的宋体（Noto Serif SC）先从 `fonts.googleapis.cn` 拿（国内快），拿不到会自动换 `fonts.googleapis.com`；都拿不到就用系统自带的宋体（Noto Serif CJK / 思源宋体 / 宋体）。想离线用，可以自己托管 Noto Serif SC，把页面头上那条字体 link 换成你自己的地址。
 - 可选：套在安卓壳（WebView）里的话，壳可以注入 `window.RadioNative`：`radioState(json)` / `radioStop()` 出系统播放栏，`openUrl(url)` 打开网易云 App。没有也不影响。
 
 **环境变量**

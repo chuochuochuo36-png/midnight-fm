@@ -5,8 +5,43 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#F2EFEA">
 <title>深夜电台</title>
+<script>
+/* 字体兜底：先走下面 fonts.googleapis.cn 那两行（国内快）。它出错，或者页面加载完等字体就绪（最多 2.5 秒）
+   还没有一个 Noto Serif SC 的字加载好，就换 fonts.googleapis.com 同一串再要一次（只补一次）。都拿不到就用 --serif 里的系统宋体。
+   不用 document.fonts.check('900 1em "Noto Serif SC"') 判断：样式表整个没下来的时候一个 @font-face 都没有，它照样回 true；
+   下来了它又按字算，页面上没用到的那几组字没加载，会回 false。所以看「有没有一个 Noto Serif SC 的字真的加载好了」。 */
+var midnightFontFallback = (function () {
+  var done = false;
+  return function () {
+    if (done) return;
+    var cn = document.querySelector('link[href*="fonts.googleapis.cn/css2"]');
+    if (!cn) return;
+    done = true;
+    ['https://fonts.googleapis.com', 'https://fonts.gstatic.com'].forEach(function (h) {
+      var pc = document.createElement('link'); pc.rel = 'preconnect'; pc.href = h; pc.crossOrigin = 'anonymous'; document.head.appendChild(pc);
+    });
+    var st = document.createElement('link'); st.rel = 'stylesheet'; st.href = cn.href.replace('fonts.googleapis.cn', 'fonts.googleapis.com');
+    /* .com 那份到了：把 .cn 那条拿掉（.cn 的字体文件要是没下来，浏览器记着「失败」，不会自己改用后来补的同名字体），
+       再照页面上的字把三种字重要一遍，要到了页面就换上 */
+    st.onload = function () {
+      if (cn.parentNode) cn.parentNode.removeChild(cn);
+      var txt = ((document.body && document.body.innerText) || '').slice(0, 4000) || '深夜电台';
+      [500, 700, 900].forEach(function (w) { document.fonts.load(w + ' 1em "Noto Serif SC"', txt).catch(function () {}); });
+    };
+    document.head.appendChild(st);
+  };
+})();
+window.addEventListener('load', function () {
+  if (!document.fonts || !document.fonts.ready) return;
+  Promise.race([document.fonts.ready, new Promise(function (r) { setTimeout(r, 2500); })]).then(function () {
+    var ok = false;
+    document.fonts.forEach(function (f) { if (/Noto Serif SC/.test(f.family) && f.status === 'loaded') ok = true; });
+    if (!ok) midnightFontFallback();
+  });
+});
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.cn">
-<link href="https://fonts.googleapis.cn/css2?family=Noto+Serif+SC:wght@500;700;900&family=Inter:wght@300;500;800&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.cn/css2?family=Noto+Serif+SC:wght@500;700;900&family=Inter:wght@300;500;800&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" onerror="midnightFontFallback()">
 <style>
 /* 深夜电台（2026-10-17）—— 小样定稿是 radio-tape.html（磁带）。红 + 白 + 黑；一个台一盒磁带，左右滑换；夜话台关灯，枕話更暗。
    这一页只管放：每一段话是后端 /api/radio/turn 做好的（他在 radio_<台> 那个会话里说的），念好的音频、拆好的歌和音效都在里面。 */
@@ -14,7 +49,7 @@
   --red:#D0271D; --red-lt:#E8493D;
   --paper:#F2EFEA; --ink:#171412; --ink2:#6F6860; --ink3:#A8A097; --line:rgba(23,20,18,.12);
   --dev:#FCFBF8; --dev2:#ECE8E1; --dots:#D4CEC5; --sheet:#FBFAF7;
-  --serif:'Noto Serif SC','Songti SC','STSong','SimSun',serif;
+  --serif:'Noto Serif SC','Noto Serif CJK SC','Source Han Serif SC','Source Han Serif CN','Songti SC','STSong','SimSun',serif;
   --sans:'Inter',system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
   --mono:'IBM Plex Mono',ui-monospace,Consolas,monospace;
   --t:900ms cubic-bezier(.4,0,.2,1);
