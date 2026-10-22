@@ -519,6 +519,80 @@ const fake = http.createServer((req, res) => {
   api._setSearch(fakeSearch);
   ok('放不了的那首：这个歌手在这边能放的几首递给他（v11）');
 
+  /* SEG:RADIO v18 —— 一次几首候选：放第一首能放的、七天里没放过的 */
+  {
+    const asked = [];
+    api._setSearch(async (kw) => {
+      asked.push(kw);
+      if (/候选一/.test(kw)) return { data: { records: [{ id: 'Y1', name: '候选一', artists: [{ name: '甲歌手' }], visible: false }] } };
+      if (/候选二/.test(kw)) return { data: { records: [{ id: 'Y2', name: '候选二', artists: [{ name: '乙歌手' }], visible: true }] } };
+      if (/候选三/.test(kw)) return { data: { records: [{ id: 'Y3', name: '候选三', artists: [{ name: '丙' }], visible: true }] } };
+      return { data: { records: [] } };
+    });
+    forceTalk = ['放一首。', '[song:候选一|甲歌手；候选二|乙歌手；候选三|丙]'];
+    r = await api.turn({ station: 'talk', kind: 'next' });
+    let sp = r.obj.parts.filter(p => p.type === 'song');
+    assert.ok(sp.length === 1 && sp[0].title === '候选二' && sp[0].enc === 'Y2' && !sp[0].alts, '放第一首能放的：' + JSON.stringify(r.obj.parts));
+    assert.ok(asked.some(k => /候选三/.test(k)), '几首是一起去看的');
+    /* 同一组再来一遍：候选二刚放过，跳到候选三 */
+    r = await api.turn({ station: 'talk', kind: 'next' });
+    let m18 = got[got.length - 1].body.message;
+    assert.ok(/候选里，《候选一》（因合作方要求，暂不支持收听）没放，放的是《候选二》。/.test(m18), m18);
+    sp = r.obj.parts.filter(p => p.type === 'song');
+    assert.ok(sp.length === 1 && sp[0].title === '候选三', '放过的跳过：' + JSON.stringify(r.obj.parts));
+    forceTalk = null;
+    r = await api.turn({ station: 'talk', kind: 'next' });
+    m18 = got[got.length - 1].body.message;
+    assert.ok(/《候选二》（这几天刚放过）没放，放的是《候选三》/.test(m18), m18);
+    /* 一首都放不了：留一行「放不了」，下一段几首都告诉他 */
+    forceTalk = ['再放一首。', '[song:候选一|甲歌手；候选四|丁]'];
+    r = await api.turn({ station: 'talk', kind: 'next' });
+    forceTalk = null;
+    assert.deepStrictEqual(r.obj.parts.map(p => p.type + ':' + (p.title || '')), ['say:', 'nosong:候选一']);
+    r = await api.turn({ station: 'talk', kind: 'next' });
+    m18 = got[got.length - 1].body.message;
+    assert.ok(/《候选一》《候选四》在这边放不出来/.test(m18) && !/候选里/.test(m18), m18);
+    api._setSearch(fakeSearch);
+  }
+  ok('一次几首候选：放第一首能放的、跳过七天里放过的、都放不了才留一行（v18）');
+
+  /* SEG:RADIO v19 —— 他先查再写：/api/radio/check */
+  {
+    api._setSearch(async (kw) => {
+      if (/查一/.test(kw)) return { data: { records: [{ id: 'Q1', name: '查一', artists: [{ name: '甲' }], visible: false }] } };
+      if (/查二/.test(kw)) return { data: { records: [{ id: 'Q2', name: '查二', artists: [{ name: '乙' }], visible: true }] } };
+      if (/查三/.test(kw)) return { data: { records: [{ id: 'Q3', name: '查三', artists: [{ name: '丙' }], visible: true }] } };
+      if (/查四/.test(kw)) return { data: { records: [{ id: 'Q4', name: '查四', artists: [{ name: '丁' }], visible: true }] } };
+      return null;   /* 「查五」：网易云这会儿查不了 */
+    });
+    const hotAsked = [];
+    api._setHot(async enc => { hotAsked.push(enc); return enc === 'Q2' ? { data: { hotComments: [{ content: '第一条\n热评', likedCount: 120 }, { content: '', likedCount: 3 }, { content: '第二条', likedCount: 9 }] } } : null; });
+    /* 查三 这几天放过 */
+    const stFile = path.join(site, 'radio_state.json');
+    const j = JSON.parse(fs.readFileSync(stFile, 'utf8'));
+    (j.played = j.played || []).push({ id: api.songId('查三', '丙'), title: '查三', artist: '丙', enc: 'Q3', st: 'music', at: Date.now() - 3600e3 });
+    fs.writeFileSync(stFile, JSON.stringify(j));
+    o = await call('/api/radio/check?songs=' + encodeURIComponent('查一|甲；查二|乙；查三|丙; 查四|丁；查五|戊；查六|己'));
+    assert.strictEqual(o.c, 200);
+    const sg = o.j.songs;
+    assert.strictEqual(sg.length, 5, '最多五首');
+    assert.ok(!sg[0].ok && sg[0].why === '因合作方要求，暂不支持收听', JSON.stringify(sg[0]));
+    assert.ok(sg[1].ok && sg[1].enc === 'Q2' && !sg[1].recent, JSON.stringify(sg[1]));
+    assert.deepStrictEqual(sg[1].hot, [{ text: '第一条 热评', likes: 120 }, { text: '第二条', likes: 9 }]);
+    assert.ok(sg[2].ok && sg[2].recent && !('hot' in sg[2]), '放过的标出来、不翻热评：' + JSON.stringify(sg[2]));
+    assert.ok(sg[3].ok && sg[3].hot === null, '翻不到热评回 null：' + JSON.stringify(sg[3]));
+    assert.ok(!sg[4].ok && /查不了/.test(sg[4].why), JSON.stringify(sg[4]));
+    assert.deepStrictEqual(hotAsked.sort(), ['Q2', 'Q4'], '只给能放、没放过的前两首翻热评');
+    o = await call('/api/radio/check?songs=' + encodeURIComponent('查二|乙') + '&hot=0');
+    assert.ok(o.j.songs[0].ok && !('hot' in o.j.songs[0]), 'hot=0 不翻');
+    o = await call('/api/radio/check?songs=');
+    assert.strictEqual(o.c, 400);
+    j.played = j.played.filter(p => p.title !== '查三');
+    fs.writeFileSync(stFile, JSON.stringify(Object.assign(JSON.parse(fs.readFileSync(stFile, 'utf8')), { played: j.played })));
+    api._setSearch(fakeSearch);
+  }
+  ok('先查再写：/api/radio/check 一次五首，能不能放、放没放过、前两首带热评（v19）');
+
   /* SEG:RADIO v12 —— 网易云的说法：没版权 / 数字专辑 / 要会员 / 没搜到；playFlag=false 的版本不挑 */
   const yes = () => true;
   assert.strictEqual(api.whyNot([{ name: 'a', visible: false, originalId: 9 }], yes, yes).text, '因合作方要求，暂不支持收听');

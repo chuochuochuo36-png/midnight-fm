@@ -7,6 +7,7 @@
      <第N轨>          枕話进到第几轨
      <摘要>…</摘要>   枕話收台时那一句，进他的记忆
      [song:歌名|歌手] 放一首歌（也认聊天里歌卡的 [歌] 标题|歌手|enc|ori|封面）
+     [song:歌名|歌手；歌名|歌手；…] SEG:RADIO v18：一次几首候选（最多五首），电台挨个看能不能放，放第一首能放的
      [左耳] [右耳] [正前方] [贴近] [远一点] [身后]   声音从哪来，管到下一个位置
      [耳语] [叹气] [轻笑] [喘] [停顿]                 语气，只管紧跟着的那句
      [se:雨] …                                         音效，只认 SE 那张表
@@ -98,9 +99,13 @@ function parse(raw, opts) {
   while ((m = TOKEN.exec(text))) {
     buf += text.slice(last, m.index);
     last = TOKEN.lastIndex;
-    if (m[1] !== undefined) {                       /* [song:歌名|歌手] */
+    if (m[1] !== undefined) {                       /* [song:歌名|歌手]；v18 起可以一次写几首候选：[song:歌名|歌手；歌名|歌手；…] */
       flush();
-      parts.push({ type: 'song', title: m[1].trim(), artist: (m[2] || '').trim() });
+      const inner = m[0].slice(m[0].search(/[:：]/) + 1, -1);
+      const cands = inner.split(/[;；]/).map(x => { const f = x.split(/[|｜]/); return { title: (f[0] || '').trim(), artist: (f[1] || '').trim() }; }).filter(c => c.title).slice(0, 5);
+      const song = { type: 'song', title: cands.length ? cands[0].title : m[1].trim(), artist: cands.length ? cands[0].artist : (m[2] || '').trim() };
+      if (cands.length > 1) song.alts = cands.slice(1);   /* 电台挨个看能不能放，放第一首能放的 */
+      parts.push(song);
     } else if (m[3] !== undefined) {                /* [歌] 标题|歌手|enc|ori|封面 */
       flush();
       const f = m[3].split('|').map(x => x.trim());

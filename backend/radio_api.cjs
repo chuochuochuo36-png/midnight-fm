@@ -15,6 +15,8 @@
    GET  /api/radio/replay?station=  回放：这个台以前的每一晚（标题、几点到几点、几段）；带 &night=<id> 回那一晚的每一段
    GET  /api/radio/align?h=         这一句的逐字时间（字幕按它亮字）
    GET  /api/radio/findsong?title=&artist=   以前只记了歌名的那首，现找能放的版本
+   GET  /api/radio/check?songs=歌名|歌手；…&hot=1   放之前先查：每首能不能放（不能的话网易云怎么说）、这几天放没放过；
+                                    能放、没放过的前两首带五条热评。给主持人的查歌工具用（examples/song_check_mcp.py）
    POST /api/radio/turn             让他做一段：{ station, kind, text?, texts?, order?, opener? }
         kind: open（开播）/ next（下一段）/ her（热线）/ memo（纸条）/ req（点歌）/ bye（收台）
         回：{ ok, parts:[ {type:'say', text, show, pos, audio, align?} | {type:'se', name, pos} | {type:'song', title, artist, enc, ori, cover}
@@ -48,6 +50,10 @@
      所以换成它认的 (sighs)，认不得的删掉；ElevenLabs 这一句落回了 MiniMax，就换写法重念，之后二十分钟直接按 MiniMax 写。
    ★ 宿主取播放地址要是会被网易云记成「听过」（RADIO_URL_COUNTS_AS_PLAY=1），电台放过的就会混进她的「最近播放」，越放越像她爱听的。
      这时开播那句里多一段：这七天、八到三十天前电台放过的都不算她自己听的；看她口味，红心最准，其次是听歌排行。
+   ★ 一首歌可以写几首候选：[song:歌名|歌手；替补|歌手；…]（最多五首）。几首一起看能不能放，按写的顺序放第一首能放、七天没放过的；
+     放的不是第一首，下一段告诉他放了哪首、前面的为什么没放；全都放不了才回 nosong。
+   ★ 他看不到电台这边能不能放，所以给他一个查歌工具（examples/song_check_mcp.py，调 /api/radio/check）：写串场之前先查，挑能放的说；
+     候选是兜底。热评走 ncm-cli comment list-hot（--offset 必填，漏了回 400）。
    ★ 枕話单独用一个稳定度（0.75，念得稳一点），别的台照念字模块自己的设定。
    ★ 回放：每一段做完记一行进 RADIO_SITE_DIR/radio_archive/<台>.jsonl（她插的话、他念的每一句连声音、放的歌、音效），隔三小时以上算另一晚。
      念字时多要一份逐字时间（ElevenLabs 带时间戳的那条，同一次生成），每一块 say 带 align（那份声音的 hash），页面按真时间亮字、点字跳过去。
@@ -290,6 +296,24 @@ function ncmSearchCli(kw, limit) {
   });
 }
 let searchImpl = ncmSearchCli;   /* 单测换成假的 */
+/* SEG:RADIO v19 —— 热评：ncm-cli comment list-hot（规矩里一直让他自己翻，这回由电台这边翻好递给他） */
+function ncmHotCli(enc) {
+  return new Promise(resolve => {
+    execFile('ncm-cli', ['comment', 'list-hot', '--type', 'song', '--resourceId', String(enc), '--limit', '10', '--offset', '0', '--output', 'json'],   /* v20：--offset 也是必填，漏了就回 400 */
+      { timeout: 20000, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+        if (err) return resolve(null);
+        const s = String(out || ''); const i = s.indexOf('{');
+        try { resolve(JSON.parse(i > 0 ? s.slice(i) : s)); } catch (e) { resolve(null); }
+      });
+  });
+}
+let hotImpl = ncmHotCli;   /* 单测换成假的 */
+function pickHot(d) {
+  const b = (d && d.data) || d || {};
+  const list = [b.hotComments, b.comments, b.records, b.list, Array.isArray(b) ? b : null].find(x => Array.isArray(x) && x.length) || [];
+  return list.map(c => ({ text: String((c && (c.content || c.text)) || '').replace(/\s+/g, ' ').trim().slice(0, 200), likes: Number((c && (c.likedCount || c.likeCount)) || 0) }))
+    .filter(c => c.text).slice(0, 5);
+}
 const norm = s => String(s || '').toLowerCase().replace(/[\s'’"“”()（）\[\]【】\-—–_.,，。!！?？]/g, '');
 const PLAY_TTL = 3 * 24 * 3600 * 1000;   /* 「这首放不了」记三天，三天后再试 */
 const playMemo = new Map();               /* 这一次开机里搜过的：'歌名|歌手' → 结果 */
@@ -491,7 +515,9 @@ function compose(key, kind, text, order, st, opener, texts, lists) {
   const whyTxt = (st.unplayable || []).filter(t => whyMap[t]).map(t => '《' + t + '》' + whyMap[t]).join('；');
   const miss = ((st.unplayable && st.unplayable.length) ? '\n（上一段你点的《' + st.unplayable.join('》《') + '》在这边放不出来，网易云没有能放的版本。' + (whyTxt ? '网易云的说法：' + whyTxt + '。' : '') + '下次换一首别的。' + (alt ? alt + '。' : '') + '）' : '')
     /* SEG:RADIO v10 —— 他自己挑的撞上了七天里放过的：没放，告诉他 */
-    + ((st.repeated && st.repeated.length) ? '\n（上一段你挑的《' + st.repeated.join('》《') + '》这几天刚放过，这回没放。换一首没放过的。）' : '');
+    + ((st.repeated && st.repeated.length) ? '\n（上一段你挑的《' + st.repeated.join('》《') + '》这几天刚放过，这回没放。换一首没放过的。）' : '')
+    /* SEG:RADIO v18 —— 候选里放的不是第一首：告诉他放了哪首、前面的为什么没放 */
+    + (st.swapped || []).map(w => '\n（上一段你写的候选里，' + w.skip.map(x => '《' + x.title + '》' + (x.why ? '（' + x.why + '）' : '')).join('') + '没放，放的是《' + w.got + '》。接着说的时候按这首来。）').join('');
   if (kind === 'her') return '[电台·热线] ' + t + miss;
   if (kind === 'memo' && many.length > 1) return '[电台·纸条] 这一段攒了 ' + many.length + ' 张纸条，一起念：\n' + many.map((x, i) => (i + 1) + '. ' + x).join('\n') + miss;
   if (kind === 'memo') return '[电台·纸条] ' + (many[0] || t) + miss;
@@ -748,26 +774,36 @@ async function turn(body) {
     const missed = [], repeated = [], alts = [], why = {};
     /* SEG:RADIO v10 —— 他自己挑的（开播 / 下一段）撞上七天里放过的，不排；她点歌、热线、纸条里要的照放 */
     const noRepeat = kind === 'open' || kind === 'next';
+    const swapped = [];
     for (const p of out.parts.filter(x => x.type === 'song')) {
-      const info = {};
-      const v = await findPlayable(p.title, p.artist, cache0, info);
-      const got = v || (info.failed && p.enc ? p : null);   /* ncm-cli 这会儿搜不了：不冤枉这首，照宿主歌卡那个编号放，放不出来页面会跳过 */
-      if (!got) {
-        missed.push(p.title);
+      /* SEG:RADIO v18 —— 几首候选同时去看能不能放，按他写的顺序挑第一首能放的、七天里没放过的 */
+      const cands = [{ title: p.title, artist: p.artist }].concat(p.alts || []).slice(0, 5);
+      delete p.alts;
+      const infos = cands.map(() => ({}));
+      const found = await Promise.all(cands.map((c, i) => findPlayable(c.title, c.artist, cache0, infos[i])));
+      let pick = -1, got = null, recentHit = false;
+      for (let i = 0; i < cands.length; i++) {
+        const g = found[i] || (i === 0 && infos[0].failed && p.enc ? p : null);   /* ncm-cli 这会儿搜不了：不冤枉这首，照宿主歌卡那个编号放，放不出来页面会跳过 */
+        if (!g) continue;
+        if (noRepeat && wasRecent(s0, g)) { recentHit = true; continue; }
+        pick = i; got = g; break;
+      }
+      if (pick < 0 && recentHit) { p.drop = true; repeated.push(p.title); continue; }
+      if (pick < 0) {
+        cands.forEach((c, i) => { missed.push(c.title); const bb = infos[i].bad || {}; if (bb.text) why[c.title] = bb.text; });
         /* v12：不悄悄拿掉 —— 换成一行「放不了」，页面单子里留着，带去网易云 App 听的口子 */
-        const b = info.bad || {};
-        if (b.text) why[p.title] = b.text;
-        const nos = { type: 'nosong', title: p.title, artist: p.artist || '', text: b.text || '放不出来', ori: String(b.ori || p.ori || '') };
+        const b0 = infos[0].bad || {};
+        const nos = { type: 'nosong', title: p.title, artist: p.artist || '', text: b0.text || '放不出来', ori: String(b0.ori || p.ori || '') };
         Object.keys(p).forEach(k => { delete p[k]; });
         Object.assign(p, nos);
-        if (p.artist && !info.failed) {   /* v11：这个歌手在这边能放的，下一段递给他 */
+        if (p.artist && !infos[0].failed) {   /* v11：这个歌手在这边能放的，下一段递给他 */
           const songsOk = await playableByArtist(p.artist, p.title);
           if (songsOk.length) alts.push({ artist: String(p.artist).split(/\s*[\/、,&，]\s*/)[0].trim(), songs: songsOk });
         }
         continue;
       }
-      if (noRepeat && wasRecent(s0, got)) { p.drop = true; repeated.push(p.title); continue; }
-      if (v) Object.assign(p, v);
+      if (pick > 0) swapped.push({ got: got.title, skip: cands.slice(0, pick).map((c, i) => ({ title: c.title, why: found[i] ? '这几天刚放过' : ((infos[i].bad || {}).text || '放不出来') })) });
+      if (found[pick]) { Object.keys(p).forEach(k => { delete p[k]; }); Object.assign(p, { type: 'song' }, found[pick]); }
       notePlayed(s0, p, key);   /* 同一段里点两遍同一首，第二遍也算撞上 */
     }
     out.parts = out.parts.filter(p => !p.drop);
@@ -780,6 +816,7 @@ async function turn(body) {
     fs2.unplayableAlt = alts;
     fs2.unplayableWhy = why;
     fs2.repeated = repeated;
+    fs2.swapped = swapped;   /* v18 */
     out.parts.filter(p => p.type === 'song').forEach(p => notePlayed(fresh, p, key));   /* v10：记进「放过的」 */
     if (out.meta.bible) { fs2.bible = out.meta.bible.slice(0, 6000); fs2.bibleAt = Date.now(); }
     if (out.meta.tracks) { fs2.tracks = out.meta.tracks.slice(0, 8); fs2.trackNo = 1; }
@@ -877,6 +914,26 @@ function nightSummary(n, key) {
   if (key !== 'pillow' && says[0]) o.first = says[0].replace(/\s+/g, ' ').slice(0, 60);   /* 枕話不在单子上露字 */
   return o;
 }
+/* SEG:RADIO v19 —— 他写串场之前先查：哪几首能放、哪首这几天放过，能放的顺带几条热评 */
+async function checkSongs(raw, opt) {
+  const cands = String(raw || '').split(/[;；\n]/).map(x => { const f = x.split(/[|｜]/); return { title: (f[0] || '').trim().slice(0, 80), artist: (f[1] || '').trim().slice(0, 80) }; })
+    .filter(c => c.title).slice(0, 5);
+  const state = loadState(); const cache = state.playCache || (state.playCache = {});
+  const infos = cands.map(() => ({}));
+  const found = await Promise.all(cands.map((c, i) => findPlayable(c.title, c.artist, cache, infos[i])));
+  const out = cands.map((c, i) => {
+    const v = found[i], o = { asked: c.title + (c.artist ? '|' + c.artist : '') };
+    if (v) { o.ok = true; o.title = v.title; o.artist = v.artist; o.enc = v.enc; if (wasRecent(state, v)) o.recent = true; }
+    else { o.ok = false; o.why = infos[i].failed ? '这会儿网易云查不了（不一定放不了）' : ((infos[i].bad || {}).text || '放不出来'); }
+    return o;
+  });
+  if (opt && opt.hot) {
+    const want = out.filter(o => o.ok && !o.recent).slice(0, 2);
+    await Promise.all(want.map(async o => { const d = await hotImpl(o.enc); o.hot = d ? pickHot(d) : null; }));
+  }
+  const fresh = loadState(); fresh.playCache = Object.assign(fresh.playCache || {}, cache); writeJson(STATE_FILE, fresh);
+  return out;
+}
 function sendAlign(res, h) {
   if (!/^[0-9a-f]{40}$/.test(String(h || ''))) return send(res, 400, { error: 'h 不对' });
   let dir = ''; try { dir = tts().CACHE_DIR; } catch (e) {}
@@ -904,6 +961,11 @@ async function handle(req, res) {
         return send(res, 200, { station: key, night: nightSummary(n, key), segs: n.segs });
       }
       return send(res, 200, { station: key, nights: nights.slice(-120).reverse().map(n => nightSummary(n, key)) });
+    }
+    if (req.method === 'GET' && p === '/api/radio/check') {   /* SEG:RADIO v19 */
+      const raw = String(u.searchParams.get('songs') || '').slice(0, 600);
+      if (!raw.trim()) return send(res, 400, { error: '要 songs=歌名|歌手；歌名|歌手' });
+      return send(res, 200, { songs: await checkSongs(raw, { hot: u.searchParams.get('hot') !== '0' }) });
     }
     if (req.method === 'GET' && p === '/api/radio/findsong') {
       const title = String(u.searchParams.get('title') || '').slice(0, 80), artist = String(u.searchParams.get('artist') || '').slice(0, 80);
@@ -960,5 +1022,5 @@ async function handle(req, res) {
 }
 
 startIdle();
-module.exports = { handle, turn, compose, findPlayable, nightTitle, cleanTitle, nightsOf, readArchive, archFile, slimPart, ARCHIVE_DIR, genSe, seList, ncmSince, digest, sweep, startIdle, forMiniMax, parseLrc, buildLyric, getLyricTimed, near, songId, whyNot, STATIONS, DEFAULT_OPENERS, SE_LIB, IDLE_MIN,
-  _setSearch: f => { searchImpl = f; playMemo.clear(); artistMemo.clear(); }, _setLyric: f => { lyricImpl = f; lyricMemo.clear(); }, _setSePost: f => { sePostImpl = f; }, _setAsk: f => { askImpl = f; }, _resetEl: () => { elDownUntil = 0; } };
+module.exports = { handle, turn, compose, findPlayable, checkSongs, pickHot, nightTitle, cleanTitle, nightsOf, readArchive, archFile, slimPart, ARCHIVE_DIR, genSe, seList, ncmSince, digest, sweep, startIdle, forMiniMax, parseLrc, buildLyric, getLyricTimed, near, songId, whyNot, STATIONS, DEFAULT_OPENERS, SE_LIB, IDLE_MIN,
+  _setSearch: f => { searchImpl = f; playMemo.clear(); artistMemo.clear(); }, _setLyric: f => { lyricImpl = f; lyricMemo.clear(); }, _setSePost: f => { sePostImpl = f; }, _setAsk: f => { askImpl = f; }, _setHot: f => { hotImpl = f; }, _resetEl: () => { elDownUntil = 0; } };
